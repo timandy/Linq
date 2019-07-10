@@ -922,7 +922,7 @@ final class SelectIPartitionIterator<TSource, TResult> extends Iterator<TResult>
 }
 
 
-final class SelectListPartitionIterator<TSource, TResult> extends Iterator<TResult> implements IPartition<TResult> {
+final class SelectListPartitionIterator<TSource, TResult> extends ReverseIterator<TResult> implements IPartition<TResult> {
     private final IList<TSource> source;
     private final Func1<TSource, TResult> selector;
     private final int minIndexInclusive;
@@ -942,6 +942,11 @@ final class SelectListPartitionIterator<TSource, TResult> extends Iterator<TResu
     @Override
     public Iterator<TResult> clone() {
         return new SelectListPartitionIterator<>(this.source, this.selector, this.minIndexInclusive, this.maxIndexInclusive);
+    }
+
+    @Override
+    public IEnumerable<TResult> _reverse() {
+        return new SelectReverseListPartitionIterator<>(this.source, this.selector, this.minIndexInclusive, this.maxIndexInclusive);
     }
 
     @Override
@@ -1073,6 +1078,169 @@ final class SelectListPartitionIterator<TSource, TResult> extends Iterator<TResu
         if (!onlyIfCheap) {
             int end = this.minIndexInclusive + count;
             for (int i = this.minIndexInclusive; i != end; ++i)
+                this.selector.apply(this.source.get(i));
+        }
+
+        return count;
+    }
+}
+
+
+final class SelectReverseListPartitionIterator<TSource, TResult> extends ReverseIterator<TResult> implements IPartition<TResult> {
+    private final IList<TSource> source;
+    private final Func1<TSource, TResult> selector;
+    private final int minIndexInclusive;
+    private final int maxIndexInclusive;
+
+    SelectReverseListPartitionIterator(IList<TSource> source, Func1<TSource, TResult> selector, int minIndexInclusive, int maxIndexInclusive) {
+        assert source != null;
+        assert selector != null;
+        assert minIndexInclusive >= 0;
+        assert minIndexInclusive <= maxIndexInclusive;
+        this.source = source;
+        this.selector = selector;
+        this.minIndexInclusive = minIndexInclusive;
+        this.maxIndexInclusive = maxIndexInclusive;
+    }
+
+    @Override
+    public Iterator<TResult> clone() {
+        return new SelectReverseListPartitionIterator<>(this.source, this.selector, this.minIndexInclusive, this.maxIndexInclusive);
+    }
+
+    @Override
+    public IEnumerable<TResult> _reverse() {
+        return new SelectListPartitionIterator<>(this.source, this.selector, this.minIndexInclusive, this.maxIndexInclusive);
+    }
+
+    @Override
+    public boolean moveNext() {
+        // _state - 1 represents the zero-based index into the list.
+        // Having a separate field for the index would be more readable. However, we save it
+        // into _state with a bias to minimize field size of the iterator.
+        int index = this.state - 1;
+        int count = this.source._getCount();
+        if (Integer.compareUnsigned(index, this.maxIndexInclusive - this.minIndexInclusive) <= 0 && index < count - this.minIndexInclusive) {
+            this.current = this.selector.apply(this.source.get(Math.min(count - 1, this.maxIndexInclusive) - index));
+            ++this.state;
+            return true;
+        }
+
+        this.close();
+        return false;
+    }
+
+    @Override
+    public <TResult2> IEnumerable<TResult2> _select(Func1<TResult, TResult2> selector) {
+        return new SelectReverseListPartitionIterator<>(this.source, Utilities.combineSelectors(this.selector, selector), this.minIndexInclusive, this.maxIndexInclusive);
+    }
+
+    @Override
+    public IPartition<TResult> _skip(int count) {
+        assert count > 0;
+        int maxIndex = Math.min(this.source._getCount() - 1, this.maxIndexInclusive) - count;
+        return maxIndex < this.minIndexInclusive ? EmptyPartition.instance() : new SelectReverseListPartitionIterator<>(this.source, this.selector, this.minIndexInclusive, maxIndex);
+    }
+
+    @Override
+    public IPartition<TResult> _take(int count) {
+        assert count > 0;
+        int minIndex = Math.min(this.source._getCount() - 1, this.maxIndexInclusive) - count + 1;
+        return minIndex <= this.minIndexInclusive ? this : new SelectReverseListPartitionIterator<>(this.source, this.selector, minIndex, this.maxIndexInclusive);
+    }
+
+    @Override
+    public TResult _tryGetElementAt(int index, out<Boolean> found) {
+        int count = this.source._getCount();
+        if (Integer.compareUnsigned(index, this.maxIndexInclusive - this.minIndexInclusive) <= 0 && index < count - this.minIndexInclusive) {
+            found.value = true;
+            return this.selector.apply(this.source.get(Math.min(count - 1, this.maxIndexInclusive) - index));
+        }
+
+        found.value = false;
+        return null;
+    }
+
+    @Override
+    public TResult _tryGetFirst(out<Boolean> found) {
+        int lastIndex = this.source._getCount() - 1;
+        if (lastIndex >= this.minIndexInclusive) {
+            found.value = true;
+            return this.selector.apply(this.source.get(Math.min(lastIndex, this.maxIndexInclusive)));
+        }
+
+        found.value = false;
+        return null;
+    }
+
+    @Override
+    public TResult _tryGetLast(out<Boolean> found) {
+        if (this.source._getCount() > this.minIndexInclusive) {
+            found.value = true;
+            return this.selector.apply(this.source.get(this.minIndexInclusive));
+        }
+
+        found.value = false;
+        return null;
+    }
+
+    private int getCount() {
+        int count = this.source._getCount();
+        if (count <= this.minIndexInclusive)
+            return 0;
+
+        return Math.min(count - 1, this.maxIndexInclusive) - this.minIndexInclusive + 1;
+    }
+
+    @Override
+    public TResult[] _toArray(Class<TResult> clazz) {
+        int count = this.getCount();
+        if (count == 0)
+            return ArrayUtils.empty(clazz);
+
+        TResult[] array = ArrayUtils.newInstance(clazz, count);
+        for (int i = 0, curIdx = Math.min(this.source._getCount() - 1, this.maxIndexInclusive); i != array.length; ++i, --curIdx)
+            array[i] = this.selector.apply(this.source.get(curIdx));
+
+        return array;
+    }
+
+    @Override
+    public Object[] _toArray() {
+        int count = this.getCount();
+        if (count == 0)
+            return ArrayUtils.empty();
+
+        Object[] array = new Object[count];
+        for (int i = 0, curIdx = Math.min(this.source._getCount() - 1, this.maxIndexInclusive); i != array.length; ++i, --curIdx)
+            array[i] = this.selector.apply(this.source.get(curIdx));
+
+        return array;
+    }
+
+    @Override
+    public List<TResult> _toList() {
+        int count = this.getCount();
+        if (count == 0)
+            return ListUtils.empty();
+
+        List<TResult> list = new ArrayList<>(count);
+        int end = this.minIndexInclusive - 1;
+        for (int i = Math.min(this.source._getCount() - 1, this.maxIndexInclusive); i != end; --i)
+            list.add(this.selector.apply(this.source.get(i)));
+
+        return list;
+    }
+
+    @Override
+    public int _getCount(boolean onlyIfCheap) {
+        // In case someone uses Count() to force evaluation of
+        // the selector, run it provided `onlyIfCheap` is false.
+        int count = this.getCount();
+
+        if (!onlyIfCheap) {
+            int end = this.minIndexInclusive - 1;
+            for (int i = Math.min(this.source._getCount() - 1, this.maxIndexInclusive); i != end; --i)
                 this.selector.apply(this.source.get(i));
         }
 
